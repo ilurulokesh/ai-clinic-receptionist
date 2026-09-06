@@ -1,0 +1,252 @@
+{
+  "name": "Clinic Booking — Workflow B: Confirm & Notify",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "confirm-and-notify",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-wb-webhook-in",
+      "name": "Webhook — Post-Booking Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "clinic-confirm-notify-01",
+      "notes": "SETUP: Copy this webhook URL and register it in Tough Tongue AI as a second custom tool called 'send_confirmation'. Tough Tongue AI calls this after the patient confirms their booking (and optionally payment mode)."
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? $input.first().json;\n\nreturn [{\n  json: {\n    patientName:    body.patient_name   ?? body.patientName   ?? 'Patient',\n    patientPhone:   body.patient_phone  ?? body.patientPhone  ?? '',\n    confirmedDate:  body.confirmed_date ?? body.confirmedDate ?? '',\n    confirmedTime:  body.confirmed_time ?? body.confirmedTime ?? '',\n    paymentMode:    body.payment_mode   ?? body.paymentMode   ?? 'pay_at_clinic',\n    // Optional: if you collect email in conversation\n    patientEmail:   body.patient_email  ?? body.patientEmail  ?? ''\n  }\n}];"
+      },
+      "id": "node-wb-parse",
+      "name": "Parse Booking Confirmation",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": false, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "cond-upi",
+              "leftValue": "={{$json.paymentMode}}",
+              "rightValue": "upi",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        }
+      },
+      "id": "node-wb-if-payment",
+      "name": "IF — UPI Payment?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300],
+      "notes": "If payment_mode == 'upi', generate a Razorpay/UPI link. Otherwise, skip payment and go straight to notifications."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.razorpay.com/v1/payment_links",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "amount": 50000,
+          "currency": "INR",
+          "description": "=Clinic appointment — {{$('Parse Booking Confirmation').first().json.confirmedDate}} {{$('Parse Booking Confirmation').first().json.confirmedTime}}",
+          "customer": {
+            "name": "={{$('Parse Booking Confirmation').first().json.patientName}}",
+            "contact": "={{$('Parse Booking Confirmation').first().json.patientPhone}}"
+          },
+          "notify": { "sms": true, "email": false },
+          "reminder_enable": true,
+          "callback_url": "https://your-clinic-website.com/payment-success",
+          "callback_method": "get"
+        },
+        "options": {}
+      },
+      "id": "node-wb-razorpay",
+      "name": "Razorpay — Create Payment Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [900, 180],
+      "credentials": {
+        "httpBasicAuth": {
+          "id": "REPLACE_WITH_RAZORPAY_CREDENTIAL_ID",
+          "name": "Razorpay Basic Auth"
+        }
+      },
+      "notes": "SETUP: Create an HTTP Basic Auth credential using your Razorpay Key ID (username) and Key Secret (password). Change 'amount' from 50000 (= ₹500 in paise) to your actual consultation fee. Change callback_url to your clinic's real domain."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://graph.facebook.com/v19.0/YOUR_WHATSAPP_PHONE_NUMBER_ID/messages",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{$vars.WHATSAPP_TOKEN}}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "={{$('Parse Booking Confirmation').first().json.patientPhone}}",
+          "type": "template",
+          "template": {
+            "name": "clinic_booking_confirmation",
+            "language": { "code": "te" },
+            "components": [
+              {
+                "type": "body",
+                "parameters": [
+                  { "type": "text", "text": "={{$('Parse Booking Confirmation').first().json.patientName}}" },
+                  { "type": "text", "text": "={{$('Parse Booking Confirmation').first().json.confirmedDate}}" },
+                  { "type": "text", "text": "={{$('Parse Booking Confirmation').first().json.confirmedTime}}" },
+                  { "type": "text", "text": "={{$json.short_url ?? 'Pay at clinic'}}" }
+                ]
+              }
+            ]
+          }
+        },
+        "options": {}
+      },
+      "id": "node-wb-whatsapp",
+      "name": "WhatsApp — Send Confirmation",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 300],
+      "notes": "SETUP: Replace YOUR_WHATSAPP_PHONE_NUMBER_ID with your WhatsApp Business API phone number ID from Meta Business Manager. Set WHATSAPP_TOKEN as a workflow variable (your permanent system user access token). You MUST pre-register the template 'clinic_booking_confirmation' in Telugu with Meta before this will work — template approval takes 1-2 days."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.msg91.com/api/v5/flow/",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "authkey", "value": "={{$vars.MSG91_AUTHKEY}}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "template_id": "YOUR_MSG91_TEMPLATE_ID",
+          "sender": "CLINIC",
+          "short_url": "1",
+          "mobiles": "=91{{$('Parse Booking Confirmation').first().json.patientPhone.replace(/^0|^\\+91/, '')}}",
+          "VAR1": "={{$('Parse Booking Confirmation').first().json.patientName}}",
+          "VAR2": "={{$('Parse Booking Confirmation').first().json.confirmedDate}}",
+          "VAR3": "={{$('Parse Booking Confirmation').first().json.confirmedTime}}"
+        },
+        "options": {}
+      },
+      "id": "node-wb-sms",
+      "name": "MSG91 — Send SMS",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1120, 440],
+      "notes": "SETUP: Sign up at msg91.com. Set MSG91_AUTHKEY as a workflow variable. Register a DLT-approved SMS template (required by TRAI for transactional SMS in India) and paste its ID in template_id. Replace 'CLINIC' with your 6-char DLT-approved sender ID."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"notifications_sent\",\n  \"message_to_speak\": \"Done! I've sent a confirmation to your WhatsApp and phone. See you at the clinic.\"\n}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "node-wb-respond-done",
+      "name": "Respond — All Done",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1360, 370],
+      "notes": "Final response back to Tough Tongue AI. The AI speaks 'message_to_speak' to the patient and ends the call gracefully."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"error\",\n  \"message_to_speak\": \"I had trouble sending your confirmation, but your appointment is saved. The clinic will send you details shortly.\"\n}",
+        "options": { "responseCode": 500 }
+      },
+      "id": "node-wb-respond-error",
+      "name": "Respond — Notification Error",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1360, 560]
+    }
+  ],
+  "connections": {
+    "Webhook — Post-Booking Trigger": {
+      "main": [
+        [{ "node": "Parse Booking Confirmation", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Booking Confirmation": {
+      "main": [
+        [{ "node": "IF — UPI Payment?", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF — UPI Payment?": {
+      "main": [
+        [{ "node": "Razorpay — Create Payment Link", "type": "main", "index": 0 }],
+        [{ "node": "WhatsApp — Send Confirmation", "type": "main", "index": 0 }]
+      ]
+    },
+    "Razorpay — Create Payment Link": {
+      "main": [
+        [{ "node": "WhatsApp — Send Confirmation", "type": "main", "index": 0 }]
+      ]
+    },
+    "WhatsApp — Send Confirmation": {
+      "main": [
+        [{ "node": "MSG91 — Send SMS", "type": "main", "index": 0 }]
+      ]
+    },
+    "MSG91 — Send SMS": {
+      "main": [
+        [{ "node": "Respond — All Done", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner"
+  },
+  "staticData": null,
+  "tags": ["clinic", "booking", "whatsapp", "sms", "razorpay"],
+  "triggerCount": 0,
+  "variables": [
+    {
+      "id": "var-wa-token",
+      "key": "WHATSAPP_TOKEN",
+      "type": "string",
+      "value": "YOUR_META_SYSTEM_USER_ACCESS_TOKEN"
+    },
+    {
+      "id": "var-msg91",
+      "key": "MSG91_AUTHKEY",
+      "type": "string",
+      "value": "YOUR_MSG91_AUTHKEY"
+    }
+  ],
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "clinic-booking-bot-instance",
+    "templateCredsSetupCompleted": false
+  }
+}

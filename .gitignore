@@ -1,0 +1,21 @@
+# Secrets and credentials — never commit these
+.env
+*.env.local
+*.env.production
+
+# n8n exports with real credentials
+n8n-workflows/*-exported.json
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+logs/

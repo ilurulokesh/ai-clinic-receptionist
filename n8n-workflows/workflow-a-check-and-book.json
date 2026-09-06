@@ -1,0 +1,223 @@
+{
+  "name": "Clinic Booking — Workflow A: Check & Book",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "check-and-book",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-in",
+      "name": "Webhook — Tough Tongue AI Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [240, 300],
+      "webhookId": "clinic-check-book-01",
+      "notes": "SETUP: After importing, activate this workflow. Copy the generated webhook URL from this node and paste it into Tough Tongue AI > Custom Tools as the endpoint URL. Tough Tongue AI will POST a JSON body here."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Parse & normalise the payload from Tough Tongue AI ──────────────────\n// Tough Tongue AI sends tool arguments inside a 'parameters' or 'arguments' key.\n// Adjust the field names below if their payload shape differs.\nconst body = $input.first().json.body ?? $input.first().json;\n\n// Expected fields from the AI conversation:\nconst patientName   = body.patient_name   ?? body.patientName   ?? 'Unknown Patient';\nconst patientPhone  = body.patient_phone  ?? body.patientPhone  ?? '';\nconst requestedDate = body.requested_date ?? body.requestedDate ?? '';\n// e.g. '2026-09-10'\nconst requestedTime = body.requested_time ?? body.requestedTime ?? '';\n// e.g. '14:00'  (24-hr, IST)\n\n// Build ISO 8601 start/end datetimes in IST (UTC+5:30)\n// Appointment duration: 30 minutes (change as needed)\nconst startIST = `${requestedDate}T${requestedTime}:00+05:30`;\nconst [h, m] = requestedTime.split(':').map(Number);\nconst endMinutes = m + 30;\nconst endH = String(h + Math.floor(endMinutes / 60)).padStart(2, '0');\nconst endM = String(endMinutes % 60).padStart(2, '0');\nconst endIST   = `${requestedDate}T${endH}:${endM}:00+05:30`;\n\nreturn [{\n  json: {\n    patientName,\n    patientPhone,\n    requestedDate,\n    requestedTime,\n    startIST,\n    endIST\n  }\n}];"
+      },
+      "id": "node-parse-input",
+      "name": "Parse & Normalise Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300],
+      "notes": "Converts Tough Tongue AI's payload into clean date/time strings. Appointment duration is 30 minutes — change line 'const endMinutes = m + 30' if needed."
+    },
+    {
+      "parameters": {
+        "resource": "freebusy",
+        "calendarId": "={{$vars.GOOGLE_CALENDAR_ID}}",
+        "timeMin": "={{$json.startIST}}",
+        "timeMax": "={{$json.endIST}}",
+        "options": {}
+      },
+      "id": "node-gcal-check",
+      "name": "Google Calendar — Check Availability",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.1,
+      "position": [680, 300],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GCAL_CREDENTIAL_ID",
+          "name": "Google Calendar (Clinic)"
+        }
+      },
+      "notes": "SETUP: Create a Google Calendar OAuth2 credential in n8n (Settings > Credentials > New > Google Calendar OAuth2 Api). Scopes needed: https://www.googleapis.com/auth/calendar. Then replace REPLACE_WITH_YOUR_GCAL_CREDENTIAL_ID above. Also set the GOOGLE_CALENDAR_ID workflow variable (the calendar's email address, e.g. doctor@gmail.com or a dedicated calendar ID)."
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-slot-free",
+              "leftValue": "={{$json.calendars[$vars.GOOGLE_CALENDAR_ID].busy.length}}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-if-free",
+      "name": "IF — Slot Free?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300],
+      "notes": "True branch = slot is free → create event. False branch = slot is busy → find next available slot."
+    },
+    {
+      "parameters": {
+        "calendar": {
+          "__rl": true,
+          "value": "={{$vars.GOOGLE_CALENDAR_ID}}",
+          "mode": "id"
+        },
+        "start": "={{$('Parse & Normalise Input').first().json.startIST}}",
+        "end": "={{$('Parse & Normalise Input').first().json.endIST}}",
+        "additionalFields": {
+          "summary": "=Clinic Appt — {{$('Parse & Normalise Input').first().json.patientName}}",
+          "description": "=Patient: {{$('Parse & Normalise Input').first().json.patientName}}\nPhone: {{$('Parse & Normalise Input').first().json.patientPhone}}\nBooked via: Tough Tongue AI voice assistant",
+          "location": "Clinic",
+          "guestsCanModify": false,
+          "sendUpdates": "none"
+        }
+      },
+      "id": "node-gcal-create",
+      "name": "Google Calendar — Create Event",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.1,
+      "position": [1120, 200],
+      "credentials": {
+        "googleCalendarOAuth2Api": {
+          "id": "REPLACE_WITH_YOUR_GCAL_CREDENTIAL_ID",
+          "name": "Google Calendar (Clinic)"
+        }
+      },
+      "notes": "Creates the appointment. Summary and description are auto-filled from patient data. Add guest email field if you collect patient email in the conversation."
+    },
+    {
+      "parameters": {
+        "jsCode": "// ── Find next available 30-min slot (searches up to 8 slots ahead) ───────\nconst input = $('Parse & Normalise Input').first().json;\nconst busyBlocks = $input.first().json.calendars[process.env.GOOGLE_CALENDAR_ID ?? $vars.GOOGLE_CALENDAR_ID]?.busy ?? [];\n\n// Parse requested start\nlet candidateMs = new Date(input.startIST).getTime();\nconst slotMs = 30 * 60 * 1000; // 30 minutes\nconst clinicEndHour = 18; // clinic closes at 6 PM IST — adjust as needed\n\nfor (let i = 0; i < 8; i++) {\n  const candidateStart = new Date(candidateMs);\n  const candidateEnd   = new Date(candidateMs + slotMs);\n\n  // Stop searching past clinic closing time\n  if (candidateStart.getHours() >= clinicEndHour) {\n    return [{ json: { slotFound: false, message: 'No slots available today after this time.' } }];\n  }\n\n  const isBusy = busyBlocks.some(block => {\n    const bStart = new Date(block.start).getTime();\n    const bEnd   = new Date(block.end).getTime();\n    // Overlap check\n    return candidateMs < bEnd && (candidateMs + slotMs) > bStart;\n  });\n\n  if (!isBusy) {\n    const pad = n => String(n).padStart(2, '0');\n    const hh = pad(candidateStart.getHours());\n    const mm = pad(candidateStart.getMinutes());\n    return [{ json: {\n      slotFound: true,\n      suggestedTime: `${hh}:${mm}`,\n      suggestedStartIST: candidateStart.toISOString().replace('Z', '+05:30'),\n      suggestedEndIST:   candidateEnd.toISOString().replace('Z', '+05:30'),\n      patientName:  input.patientName,\n      patientPhone: input.patientPhone\n    }}];\n  }\n\n  candidateMs += slotMs; // try the next 30-min window\n}\n\nreturn [{ json: { slotFound: false, message: 'No slots available in the next 4 hours.' } }];"
+      },
+      "id": "node-find-next-slot",
+      "name": "Find Next Available Slot",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1120, 420],
+      "notes": "Scans forward in 30-min increments to find the next free window. Clinic closing hour defaults to 18:00 (6 PM). Change 'clinicEndHour' to match actual hours."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"status\": \"booked\",\n  \"confirmed_time\": \"{{$('Parse & Normalise Input').first().json.requestedTime}}\",\n  \"confirmed_date\": \"{{$('Parse & Normalise Input').first().json.requestedDate}}\",\n  \"patient_name\": \"{{$('Parse & Normalise Input').first().json.patientName}}\",\n  \"event_id\": \"{{$json.id}}\",\n  \"message_to_speak\": \"Great! Your appointment is confirmed for {{$('Parse & Normalise Input').first().json.requestedDate}} at {{$('Parse & Normalise Input').first().json.requestedTime}}. You will receive a WhatsApp confirmation shortly.\"\n}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-booked",
+      "name": "Respond — Booking Confirmed",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1360, 200],
+      "notes": "Returns JSON to Tough Tongue AI. The 'message_to_speak' field is what the AI will say aloud to the patient. Customise the Telugu text or keep English — Tough Tongue AI will handle TTS."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({\n  status: $json.slotFound ? 'suggest_new_slot' : 'no_slots',\n  suggested_time: $json.suggestedTime ?? null,\n  suggested_date: $('Parse & Normalise Input').first().json.requestedDate,\n  patient_name: $('Parse & Normalise Input').first().json.patientName,\n  message_to_speak: $json.slotFound\n    ? `Sorry, that slot is taken. Doctor is free at ${$json.suggestedTime}. Shall I book that for you?`\n    : 'Sorry, there are no available slots for the rest of today. Would you like to book for tomorrow?'\n}) }}",
+        "options": {
+          "responseCode": 200
+        }
+      },
+      "id": "node-respond-suggest",
+      "name": "Respond — Suggest New Slot",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1360, 420],
+      "notes": "When the requested slot is busy, this tells Tough Tongue AI the next available time. Tough Tongue AI reads 'message_to_speak' back to the patient and waits for their yes/no."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\n  \"status\": \"error\",\n  \"message_to_speak\": \"I'm sorry, I ran into a technical issue checking the calendar. Please call the clinic directly at your earliest convenience.\"\n}",
+        "options": {
+          "responseCode": 500
+        }
+      },
+      "id": "node-respond-error",
+      "name": "Respond — Error Fallback",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 560],
+      "notes": "Attach this to any node's error output via 'Add Error Handler' so the AI never hangs silently if something breaks."
+    }
+  ],
+  "connections": {
+    "Webhook — Tough Tongue AI Trigger": {
+      "main": [
+        [{ "node": "Parse & Normalise Input", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse & Normalise Input": {
+      "main": [
+        [{ "node": "Google Calendar — Check Availability", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Calendar — Check Availability": {
+      "main": [
+        [{ "node": "IF — Slot Free?", "type": "main", "index": 0 }]
+      ]
+    },
+    "IF — Slot Free?": {
+      "main": [
+        [{ "node": "Google Calendar — Create Event", "type": "main", "index": 0 }],
+        [{ "node": "Find Next Available Slot", "type": "main", "index": 0 }]
+      ]
+    },
+    "Google Calendar — Create Event": {
+      "main": [
+        [{ "node": "Respond — Booking Confirmed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Find Next Available Slot": {
+      "main": [
+        [{ "node": "Respond — Suggest New Slot", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["clinic", "booking", "tough-tongue-ai", "google-calendar"],
+  "triggerCount": 0,
+  "variables": [
+    {
+      "id": "var-gcal-id",
+      "key": "GOOGLE_CALENDAR_ID",
+      "type": "string",
+      "value": "YOUR_DOCTOR_EMAIL_OR_CALENDAR_ID@gmail.com"
+    }
+  ],
+  "versionId": "1.0.0",
+  "meta": {
+    "instanceId": "clinic-booking-bot-instance",
+    "templateCredsSetupCompleted": false
+  }
+}

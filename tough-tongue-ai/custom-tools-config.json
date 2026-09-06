@@ -1,0 +1,91 @@
+{
+  "tools": [
+    {
+      "name": "check_and_book_appointment",
+      "description": "Check if a time slot is available on the doctor's calendar and book it if free. If the slot is taken, this tool will return the next available time. Always call this tool before confirming any appointment to the patient.",
+      "method": "POST",
+      "url": "PASTE_YOUR_N8N_WORKFLOW_A_WEBHOOK_URL_HERE",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "patient_name": {
+            "type": "string",
+            "description": "Patient's full name as spoken on the call"
+          },
+          "patient_phone": {
+            "type": "string",
+            "description": "Patient's phone number with country code, e.g. +919876543210"
+          },
+          "requested_date": {
+            "type": "string",
+            "description": "Desired appointment date in YYYY-MM-DD format, e.g. 2026-09-15"
+          },
+          "requested_time": {
+            "type": "string",
+            "description": "Desired appointment time in HH:MM 24-hour IST format, e.g. 11:00 or 14:30"
+          }
+        },
+        "required": ["patient_name", "patient_phone", "requested_date", "requested_time"]
+      },
+      "response_handling": {
+        "status_field": "status",
+        "speak_field": "message_to_speak",
+        "cases": {
+          "booked": "Read message_to_speak to the patient. Then ask payment preference.",
+          "suggest_new_slot": "Read message_to_speak to the patient. If they agree, call this tool again with suggested_date and suggested_time.",
+          "no_slots": "Read message_to_speak. Ask if they want to book for tomorrow."
+        }
+      }
+    },
+    {
+      "name": "send_confirmation",
+      "description": "Send booking confirmation to the patient via WhatsApp and SMS. Call this ONLY after the appointment is successfully booked (status=booked) and the patient has confirmed their payment preference.",
+      "method": "POST",
+      "url": "PASTE_YOUR_N8N_WORKFLOW_B_WEBHOOK_URL_HERE",
+      "headers": {
+        "Content-Type": "application/json"
+      },
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "patient_name": {
+            "type": "string",
+            "description": "Patient's full name"
+          },
+          "patient_phone": {
+            "type": "string",
+            "description": "Patient's phone number with country code"
+          },
+          "confirmed_date": {
+            "type": "string",
+            "description": "Confirmed appointment date in YYYY-MM-DD format"
+          },
+          "confirmed_time": {
+            "type": "string",
+            "description": "Confirmed appointment time in HH:MM format"
+          },
+          "payment_mode": {
+            "type": "string",
+            "enum": ["upi", "pay_at_clinic"],
+            "description": "How the patient wants to pay. Use 'upi' if they chose online payment, 'pay_at_clinic' otherwise."
+          }
+        },
+        "required": ["patient_name", "patient_phone", "confirmed_date", "confirmed_time", "payment_mode"]
+      },
+      "response_handling": {
+        "speak_field": "message_to_speak",
+        "notes": "After this tool responds, read message_to_speak to the patient and end the call gracefully."
+      }
+    }
+  ],
+  "_setup_instructions": {
+    "step1": "Import and activate both n8n workflows (workflow-a and workflow-b)",
+    "step2": "Copy Workflow A's webhook URL → paste into tools[0].url above",
+    "step3": "Copy Workflow B's webhook URL → paste into tools[1].url above",
+    "step4": "In Tough Tongue AI dashboard → your scenario → Custom Tools → paste each tool's JSON config",
+    "step5": "Test by running a sample call and checking n8n execution logs"
+  }
+}
